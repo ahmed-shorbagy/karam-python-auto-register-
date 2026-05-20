@@ -1,0 +1,36 @@
+# Secrets — use register.ini.template locally
+register.ini
+
+# Customer package (build locally with build_release.py)
+release/
+dist/
+
+# PyInstaller / Playwright build artifacts
+build/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+.venv/
+venv/
+
+# Logs and runtime
+automation.log
+processed_state.json
+error_*.png
+
+# Probe / debug outputs
+page_source.html
+form_elements.txt
+
+# Case folders (customer data)
+register_cases/
+register_finished/
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store

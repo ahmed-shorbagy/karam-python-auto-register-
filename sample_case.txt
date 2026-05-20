@@ -1,0 +1,23 @@
+<case>
+    <ssn>23703142200169</ssn>
+    <firstName>سمر</firstName>
+    <secondName>حسين</secondName>
+    <thirdName>زينهم</thirdName>
+    <fourthName>عبدالعزيز</fourthName>
+    <city>مدينة ناصر</city>
+    <address>مدينة ناصر</address>
+    <phoneNumber>01552166635</phoneNumber>
+    <governorate>
+        <option checked="1" value="22">بني سويف</option>
+    </governorate>
+    <MaritalStatus>
+        <option checked="1" value="1">متزوج</option>
+    </MaritalStatus>
+    <Job>
+        <option checked="1" value="56">بدون عمل</option>
+    </Job>
+    <ddl>
+        <option checked="1" value="3">أمراض مزمنة</option>
+    </ddl>
+    <note>ابو احمد</note>
+</case>
