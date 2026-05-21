@@ -468,7 +468,10 @@ async def fill_form(page: Page, case: CaseData) -> Optional[str]:
         msg_text = (await msg_el.inner_text()).strip()
         if msg_text:
             log.warning("[%s] Server message after SSN: %s", case.ssn, msg_text)
-            if any(kw in msg_text for kw in ["خطأ", "غير صحيح", "مسجل", "موجود"]):
+            if any(kw in msg_text for kw in ["مسجل", "موجود"]):
+                log.info("[%s] SSN already registered: %s", case.ssn, msg_text)
+                return "ALREADY_REGISTERED"
+            if any(kw in msg_text for kw in ["خطأ", "غير صحيح"]):
                 log.error("[%s] SSN rejected by server: %s", case.ssn, msg_text)
                 return None
 
@@ -622,11 +625,17 @@ async def move_to_finished(source: str, finished_folder: str) -> None:
         if target.exists():
             stem = src.stem
             target = dest / f"{stem}_{int(time.time())}{src.suffix}"
-        try:
-            shutil.move(str(src), str(target))
-            log.info("Moved '%s' -> '%s'", src.name, target)
-        except Exception as exc:
-            log.error("Failed to move '%s': %s", src.name, exc)
+        for attempt in range(3):
+            try:
+                shutil.move(str(src), str(target))
+                log.info("Moved '%s' -> '%s'", src.name, target)
+                return
+            except Exception as exc:
+                if attempt < 2:
+                    log.warning("Failed to move '%s' (attempt %d/3): %s", src.name, attempt + 1, exc)
+                    await asyncio.sleep(2)
+                else:
+                    log.error("Failed to move '%s' after 3 attempts: %s", src.name, exc)
 
 
 def discover_case_files(cases_folder: str) -> list[str]:
@@ -667,12 +676,24 @@ async def process_case(
 
             if req_id is None:
                 log.error("Submission failed for ssn=%s (no request ID)", case.ssn)
-                screenshot = app_path(f"error_{case.ssn}_{int(time.time())}.png")
+                error_dir = app_path("error_images")
+                error_dir.mkdir(parents=True, exist_ok=True)
+                screenshot = error_dir / f"error_{case.ssn}_{int(time.time())}.png"
                 try:
                     await page.screenshot(path=str(screenshot), full_page=True)
                     log.info("Error screenshot saved: %s", screenshot)
                 except Exception:
                     pass
+                return
+
+            # ── Already registered on the server → move file & mark done ──
+            if req_id == "ALREADY_REGISTERED":
+                log.info(
+                    "SSN %s already registered on server, moving '%s' to finished",
+                    case.ssn, Path(case.source_file).name,
+                )
+                await mark_processed(case.ssn, "", Path(case.source_file).name)
+                await move_to_finished(case.source_file, cfg.finished_folder)
                 return
 
             if is_valid_request_id(req_id):
@@ -726,42 +747,37 @@ async def main() -> None:
                 )
 
             log.info(
-                "Browser launched (headless). Monitoring '%s' for .xml/.txt case files…",
+                "Browser launched (headless). Scanning '%s' for .xml/.txt case files…",
                 cfg.cases_folder,
             )
 
             try:
-                while True:
-                    files = discover_case_files(cfg.cases_folder)
-                    if not files:
-                        await asyncio.sleep(cfg.sleep_delay)
-                        continue
+                files = discover_case_files(cfg.cases_folder)
+                if not files:
+                    log.info("No case files found in '%s'. Exiting.", cfg.cases_folder)
+                    return
 
-                    log.info("Found %d case file(s) to process", len(files))
+                log.info("Found %d case file(s) to process", len(files))
 
-                    cases: list[CaseData] = []
-                    for fp in files:
-                        parsed = parse_case_file(fp)
-                        if parsed:
-                            cases.append(parsed)
+                cases: list[CaseData] = []
+                for fp in files:
+                    parsed = parse_case_file(fp)
+                    if parsed:
+                        cases.append(parsed)
 
-                    if not cases:
-                        await asyncio.sleep(cfg.sleep_delay)
-                        continue
+                if not cases:
+                    log.info("No valid cases parsed. Exiting.")
+                    return
 
-                    tasks = [
-                        asyncio.create_task(
-                            process_case(case, cfg, http_session, semaphore, make_context)
-                        )
-                        for case in cases
-                    ]
-                    await asyncio.gather(*tasks, return_exceptions=True)
-
-                    log.info(
-                        "Batch complete. Sleeping %ds before next scan…",
-                        cfg.sleep_delay,
+                tasks = [
+                    asyncio.create_task(
+                        process_case(case, cfg, http_session, semaphore, make_context)
                     )
-                    await asyncio.sleep(cfg.sleep_delay)
+                    for case in cases
+                ]
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+                log.info("All %d case(s) processed. Exiting.", len(cases))
 
             except KeyboardInterrupt:
                 log.info("Shutdown requested via keyboard interrupt")
