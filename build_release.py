@@ -25,6 +25,13 @@ RELEASE_DIR = ROOT / "release"
 PACKAGE_DIR = RELEASE_DIR / "KaramaAutomation"
 DIST_DIR = ROOT / "dist" / "KaramaAutomation"
 
+# Arabic shortcuts only (no duplicate English copies)
+CUSTOMER_BATS = [
+    ("EDIT_SETTINGS.bat", "0 - تعديل الإعدادات.bat"),
+    ("1 - تشغيل البرنامج.bat", "1 - تشغيل البرنامج.bat"),
+    ("2 - اختبار تيليجرام.bat", "2 - اختبار تيليجرام.bat"),
+]
+
 
 def run(cmd: list[str]) -> None:
     print(">", " ".join(cmd))
@@ -59,36 +66,39 @@ def copy_chromium_browsers(target: Path) -> None:
 
 
 def write_customer_files(target: Path) -> None:
-    for folder in ("register_cases", "register_finished"):
+    for folder in ("register_cases", "register_finished", "error_images"):
         (target / folder).mkdir(exist_ok=True)
 
-    ini_src = ROOT / "register.ini"
-    if ini_src.exists():
-        shutil.copy2(ini_src, target / "register.ini")
-    else:
-        shutil.copy2(ROOT / "register.ini.template", target / "register.ini")
-
+    shutil.copy2(ROOT / "register.ini.template", target / "register.ini")
+    shutil.copy2(ROOT / "register.ini.template", target / "register.ini.template")
     shutil.copy2(ROOT / "sample_case.txt", target / "sample_case.txt")
     shutil.copy2(ROOT / "دليل_المستخدم.txt", target / "دليل_المستخدم.txt")
+    shutil.copy2(ROOT / "فك_الضغط_أولاً.txt", target / "فك_الضغط_أولاً.txt")
+    vbs = ROOT / "OPEN_REGISTER_INI.vbs"
+    if vbs.exists():
+        shutil.copy2(vbs, target / "0 - تعديل الإعدادات.vbs")
+
+    for src_name, dest_name in CUSTOMER_BATS:
+        src = ROOT / src_name
+        if src.exists():
+            shutil.copy2(src, target / dest_name)
 
     readme = target / "اقرأني.txt"
     readme.write_text(
         "برنامج حجز كرامة\n"
         "================\n\n"
-        "1) افتح ملف: دليل_المستخدم.txt\n"
-        "2) ضع ملفات الحالات في مجلد: register_cases\n"
-        "3) شغّل: KaramaStart.exe\n"
-        "4) لاختبار تيليجرام فقط: TestTelegram.exe\n\n"
+        "⚠️ فك ضغط الـ ZIP كاملاً إلى مجلد قبل أي تشغيل!\n"
+        "   (اقرأ: فك_الضغط_أولاً.txt)\n\n"
+        "1) 0 - تعديل الإعدادات.bat  → إعدادات تيليجرام (register.ini)\n"
+        "   إذا لم يفتح شيء: جرّب 0 - تعديل الإعدادات.vbs\n"
+        "2) 2 - اختبار تيليجرام.bat   → اختبار الإشعار\n"
+        "3) ضع ملفات .xml في: register_cases\n"
+        "4) 1 - تشغيل البرنامج.bat    → بدء الحجز\n\n"
+        "ملفات داخلية (لا تحذف):\n"
+        "  KaramaStart.exe, TestTelegram.exe, browsers, _internal\n\n"
         "لا تحذف مجلد browsers\n",
         encoding="utf-8",
     )
-
-    start = target / "KaramaStart.exe"
-    test = target / "TestTelegram.exe"
-    if start.exists():
-        shutil.copy2(start, target / "1 - تشغيل البرنامج.exe")
-    if test.exists():
-        shutil.copy2(test, target / "2 - اختبار تيليجرام.exe")
 
 
 def make_zip(source_dir: Path, zip_path: Path) -> None:
@@ -99,7 +109,8 @@ def make_zip(source_dir: Path, zip_path: Path) -> None:
             if file.is_file():
                 arcname = file.relative_to(source_dir.parent)
                 zf.write(file, arcname)
-    print(f"ZIP created: {zip_path} ({zip_path.stat().st_size // (1024 * 1024)} MB approx)")
+    size_mb = zip_path.stat().st_size // (1024 * 1024)
+    print(f"ZIP created: {zip_path} ({size_mb} MB approx)")
 
 
 def main() -> None:
@@ -112,6 +123,7 @@ def main() -> None:
         "--name", "TestTelegram",
         "--hidden-import", "app_paths",
         "--hidden-import", "notify_format",
+        "--hidden-import", "config_loader",
         "test_telegram.py",
     ])
 

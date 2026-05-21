@@ -10,7 +10,9 @@ a = Analysis(
     pathex=[],
     binaries=playwright_binaries,
     datas=playwright_datas,
-    hiddenimports=playwright_hidden + ["aiohttp", "bs4", "app_paths", "notify_format"],
+    hiddenimports=playwright_hidden + [
+        "aiohttp", "bs4", "app_paths", "notify_format", "config_loader",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

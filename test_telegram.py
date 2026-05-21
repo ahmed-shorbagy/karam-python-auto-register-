@@ -1,35 +1,19 @@
 """Send one test message using settings from register.ini (no fake link)."""
 import asyncio
-import configparser
 import sys
 from datetime import datetime
 
 import aiohttp
 
-from app_paths import app_path, is_frozen, setup_runtime
+from app_paths import pause_on_error, setup_runtime
+from config_loader import load_telegram_only
 from notify_format import build_success_message
 
 setup_runtime()
 
 
-def load_telegram_settings():
-    parser = configparser.ConfigParser()
-    parser.read(app_path("register.ini"), encoding="utf-8")
-    section = next(s for s in parser.sections() if s.upper() == "SETTINGS")
-    return (
-        parser.get(section, "TELEGRAM_BOT").strip(),
-        parser.get(section, "TELEGRAM_CHANNEL").strip(),
-    )
-
-
 async def main() -> int:
-    token, chat_id = load_telegram_settings()
-    if not token or "YOUR_BOT" in token:
-        print("ERROR: Set TELEGRAM_BOT in register.ini")
-        return 1
-    if not chat_id or "YOUR_CHANNEL" in chat_id:
-        print("ERROR: Set TELEGRAM_CHANNEL in register.ini")
-        return 1
+    token, chat_id, view_url = load_telegram_only()
 
     start_time = datetime.now().strftime("%H:%M:%S %d-%m-%Y")
     message = build_success_message(
@@ -39,6 +23,7 @@ async def main() -> int:
         phone="01000000000",
         case_type="أمراض مزمنة",
         note="رسالة تجريبية — الرابط يظهر فقط بعد تسجيل حالة حقيقية",
+        view_url_template=view_url,
         is_test=True,
     )
 
@@ -56,7 +41,7 @@ async def main() -> int:
             print(f"HTTP {resp.status}")
             print(body)
             if resp.status == 200:
-                print("\nOK: Test message sent (no link line — avoids 404 on fake reqId).")
+                print("\nOK: Test message sent using register.ini [TELEGRAM] settings.")
             return 0 if resp.status == 200 else 1
 
 
@@ -64,9 +49,10 @@ if __name__ == "__main__":
     code = 1
     try:
         code = asyncio.run(main())
+    except SystemExit as exc:
+        code = int(exc.code) if exc.code else 1
     except Exception as exc:
         print("ERROR:", exc)
-    if is_frozen():
-        print()
-        input("Press Enter to close... ")
+        code = 1
+    pause_on_error(code)
     sys.exit(code)

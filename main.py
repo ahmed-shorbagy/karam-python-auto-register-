@@ -7,7 +7,6 @@ Telegram notifications.
 """
 
 import asyncio
-import configparser
 import json
 import logging
 import os
@@ -29,8 +28,9 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeout,
 )
 
-from app_paths import APP_DIR, app_path, is_frozen, resolve_data_path, setup_runtime
-from notify_format import DEFAULT_VIEW_URL, build_success_message, is_valid_request_id
+from app_paths import APP_DIR, app_path, pause_on_error, setup_runtime
+from config_loader import load_config, AppConfig
+from notify_format import build_success_message, is_valid_request_id
 
 setup_runtime()
 
@@ -59,9 +59,7 @@ log = logging.getLogger("karama")
 # Constants
 # ---------------------------------------------------------------------------
 TARGET_URL = "http://karama.smcegy.com/karama/Register.aspx"
-VIEW_URL_TEMPLATE = DEFAULT_VIEW_URL
 STATE_FILE = app_path("processed_state.json")
-CONFIG_FILE = app_path("register.ini")
 
 # ---------------------------------------------------------------------------
 # Real ASP.NET element IDs (from live page probe)
@@ -123,56 +121,6 @@ class CaseData:
     def full_name(self) -> str:
         parts = [self.first_name, self.second_name, self.third_name, self.fourth_name]
         return " ".join(p for p in parts if p)
-
-
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-@dataclass
-class AppConfig:
-    telegram_bot: str = ""
-    telegram_channel: str = ""
-    sleep_delay: int = 3
-    cases_folder: str = "cases"
-    finished_folder: str = "finished"
-    threads_count: int = 4
-
-
-def load_config(ini_path: Path | None = None) -> AppConfig:
-    ini_path = ini_path or CONFIG_FILE
-    parser = configparser.ConfigParser()
-    if not ini_path.exists():
-        log.error("Config file '%s' not found", ini_path)
-        sys.exit(1)
-
-    parser.read(ini_path, encoding="utf-8")
-
-    section = None
-    for s in parser.sections():
-        if s.upper() == "SETTINGS":
-            section = s
-            break
-    if section is None:
-        log.error("No [SETTINGS] or [Settings] section in '%s'", ini_path)
-        sys.exit(1)
-
-    cfg = AppConfig(
-        telegram_bot=parser.get(section, "TELEGRAM_BOT", fallback="").strip(),
-        telegram_channel=parser.get(section, "TELEGRAM_CHANNEL", fallback="").strip(),
-        sleep_delay=parser.getint(section, "SLEEP", fallback=3),
-        cases_folder=str(resolve_data_path(
-            parser.get(section, "CASES_FOLDER", fallback="register_cases").strip()
-        )),
-        finished_folder=str(resolve_data_path(
-            parser.get(section, "FINISHED_FOLDER", fallback="register_finished").strip()
-        )),
-        threads_count=parser.getint(section, "THREADS_COUNT", fallback=4),
-    )
-    log.info(
-        "Config loaded: threads=%d, sleep=%ds, cases='%s', finished='%s'",
-        cfg.threads_count, cfg.sleep_delay, cfg.cases_folder, cfg.finished_folder,
-    )
-    return cfg
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +261,7 @@ async def send_telegram(
     case: CaseData,
     req_id: str,
     start_time: str,
+    view_url_template: str,
 ) -> None:
     if not bot_token or not channel_id:
         log.warning("Telegram credentials missing, skipping notification")
@@ -326,7 +275,7 @@ async def send_telegram(
         case_type=case.ddl.text,
         note=case.note,
         req_id=req_id,
-        view_url_template=VIEW_URL_TEMPLATE,
+        view_url_template=view_url_template,
     )
 
     payload = {
@@ -341,6 +290,7 @@ async def send_telegram(
             async with session.post(url, json=payload) as resp:
                 if resp.status == 200:
                     log.info("Telegram notification sent for ssn=%s", case.ssn)
+                    print(f"  ✓ أُرسل إشعار تيليجرام لـ {case.full_name or case.ssn}")
                     return
                 if resp.status == 429:
                     body = await resp.json()
@@ -616,26 +566,53 @@ async def _extract_result(page: Page, ssn: str) -> Optional[str]:
 _file_lock = asyncio.Lock()
 
 
-async def move_to_finished(source: str, finished_folder: str) -> None:
+async def move_to_finished(source: str, finished_folder: str, reason: str) -> bool:
+    """Move completed XML/txt from register_cases to register_finished."""
     async with _file_lock:
-        dest = Path(finished_folder)
-        dest.mkdir(parents=True, exist_ok=True)
+        dest_dir = Path(finished_folder)
+        dest_dir.mkdir(parents=True, exist_ok=True)
         src = Path(source)
-        target = dest / src.name
+        if not src.is_file():
+            log.warning("Cannot move '%s' — file not found", src.name)
+            return False
+        target = dest_dir / src.name
         if target.exists():
-            stem = src.stem
-            target = dest / f"{stem}_{int(time.time())}{src.suffix}"
-        for attempt in range(3):
+            target = dest_dir / f"{src.stem}_{int(time.time())}{src.suffix}"
+        for attempt in range(5):
             try:
                 shutil.move(str(src), str(target))
-                log.info("Moved '%s' -> '%s'", src.name, target)
-                return
+                log.info("Moved '%s' -> '%s' (%s)", src.name, target.name, reason)
+                print(f"  ✓ نُقل '{src.name}' → register_finished")
+                return True
             except Exception as exc:
-                if attempt < 2:
-                    log.warning("Failed to move '%s' (attempt %d/3): %s", src.name, attempt + 1, exc)
-                    await asyncio.sleep(2)
+                if attempt < 4:
+                    log.warning(
+                        "Failed to move '%s' (attempt %d/5): %s",
+                        src.name, attempt + 1, exc,
+                    )
+                    await asyncio.sleep(0.5 * (attempt + 1))
                 else:
-                    log.error("Failed to move '%s' after 3 attempts: %s", src.name, exc)
+                    log.error("Failed to move '%s' after 5 attempts: %s", src.name, exc)
+                    print(f"  ✗ تعذّر نقل '{src.name}' — سيُعاد المحاولة لاحقاً")
+        return False
+
+
+async def save_error_screenshot(
+    page: Optional[Page],
+    case: CaseData,
+    error_folder: str,
+    tag: str = "error",
+) -> None:
+    if page is None:
+        return
+    folder = Path(error_folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    screenshot = folder / f"{tag}_{case.ssn}_{int(time.time())}.png"
+    try:
+        await page.screenshot(path=str(screenshot), full_page=True)
+        log.info("Error screenshot saved: %s", screenshot)
+    except Exception as exc:
+        log.warning("Could not save error screenshot for ssn=%s: %s", case.ssn, exc)
 
 
 def discover_case_files(cases_folder: str) -> list[str]:
@@ -665,8 +642,13 @@ async def process_case(
         start_ts = datetime.now().strftime("%H:%M:%S %d-%m-%Y")
 
         if await is_already_processed(case.ssn):
-            log.info("SSN %s already processed, skipping '%s'", case.ssn, case.source_file)
-            await move_to_finished(case.source_file, cfg.finished_folder)
+            log.info(
+                "SSN %s already booked (state), moving '%s' to finished",
+                case.ssn, case.source_file,
+            )
+            await move_to_finished(
+                case.source_file, cfg.finished_folder, "already in state"
+            )
             return
 
         context: BrowserContext = await browser_context_factory()
@@ -676,24 +658,21 @@ async def process_case(
 
             if req_id is None:
                 log.error("Submission failed for ssn=%s (no request ID)", case.ssn)
-                error_dir = app_path("error_images")
-                error_dir.mkdir(parents=True, exist_ok=True)
-                screenshot = error_dir / f"error_{case.ssn}_{int(time.time())}.png"
-                try:
-                    await page.screenshot(path=str(screenshot), full_page=True)
-                    log.info("Error screenshot saved: %s", screenshot)
-                except Exception:
-                    pass
+                await save_error_screenshot(page, case, cfg.error_images_folder)
                 return
 
-            # ── Already registered on the server → move file & mark done ──
             if req_id == "ALREADY_REGISTERED":
                 log.info(
                     "SSN %s already registered on server, moving '%s' to finished",
                     case.ssn, Path(case.source_file).name,
                 )
-                await mark_processed(case.ssn, "", Path(case.source_file).name)
-                await move_to_finished(case.source_file, cfg.finished_folder)
+                moved = await move_to_finished(
+                    case.source_file, cfg.finished_folder, "already registered on server"
+                )
+                if moved:
+                    await mark_processed(
+                        case.ssn, "", Path(case.source_file).name
+                    )
                 return
 
             if is_valid_request_id(req_id):
@@ -701,24 +680,38 @@ async def process_case(
             else:
                 log.info("SUCCESS ssn=%s (no request ID in response)", case.ssn)
 
+            moved = await move_to_finished(
+                case.source_file, cfg.finished_folder, "booked successfully"
+            )
+            if not moved:
+                log.error(
+                    "Booking succeeded for ssn=%s but file was not moved — will retry next run",
+                    case.ssn,
+                )
+                return
+
             await mark_processed(
                 case.ssn,
                 req_id if is_valid_request_id(req_id) else "",
                 Path(case.source_file).name,
             )
-            await move_to_finished(case.source_file, cfg.finished_folder)
 
-            asyncio.create_task(
-                send_telegram(
-                    http_session, cfg.telegram_bot, cfg.telegram_channel,
-                    case, req_id, start_ts,
-                )
+            await send_telegram(
+                http_session,
+                cfg.telegram_bot,
+                cfg.telegram_channel,
+                case,
+                req_id,
+                start_ts,
+                cfg.telegram_view_url,
             )
 
         except PlaywrightTimeout as exc:
             log.error("Playwright timeout for ssn=%s: %s", case.ssn, exc)
+            await save_error_screenshot(page, case, cfg.error_images_folder, tag="timeout")
         except Exception as exc:
             log.exception("Unexpected error processing ssn=%s: %s", case.ssn, exc)
+            await save_error_screenshot(page, case, cfg.error_images_folder, tag="exception")
         finally:
             await page.close()
             await context.close()
@@ -727,80 +720,124 @@ async def process_case(
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-async def main() -> None:
+def _load_pending_cases(cases_folder: str) -> list[CaseData]:
+    cases: list[CaseData] = []
+    for fp in discover_case_files(cases_folder):
+        parsed = parse_case_file(fp)
+        if parsed:
+            cases.append(parsed)
+    return cases
+
+
+async def _process_batch(
+    cases: list[CaseData],
+    cfg: AppConfig,
+    http_session: aiohttp.ClientSession,
+    browser,
+) -> None:
+    semaphore = asyncio.Semaphore(cfg.threads_count)
+
+    async def make_context() -> BrowserContext:
+        return await browser.new_context(
+            viewport={"width": 1280, "height": 900},
+            locale="ar-EG",
+        )
+
+    print(f"\n── معالجة {len(cases)} ملف/ملفات ──")
+    log.info("Processing %d case(s)…", len(cases))
+
+    tasks = [
+        asyncio.create_task(
+            process_case(case, cfg, http_session, semaphore, make_context)
+        )
+        for case in cases
+    ]
+    await asyncio.gather(*tasks, return_exceptions=True)
+    log.info("Batch of %d case(s) finished.", len(cases))
+    print("── انتهت الدفعة ──\n")
+
+
+async def main() -> int:
     cfg = load_config()
 
     log.info("Program folder: %s", APP_DIR)
     Path(cfg.cases_folder).mkdir(parents=True, exist_ok=True)
     Path(cfg.finished_folder).mkdir(parents=True, exist_ok=True)
+    Path(cfg.error_images_folder).mkdir(parents=True, exist_ok=True)
 
-    semaphore = asyncio.Semaphore(cfg.threads_count)
+    initial_cases = _load_pending_cases(cfg.cases_folder)
+    if not initial_cases:
+        log.info("No case files in '%s'. Closing program.", cfg.cases_folder)
+        print("لا توجد ملفات في register_cases — ضع ملفات .xml ثم شغّل البرنامج.")
+        return 0
+
+    log.info("Found %d case file(s) in '%s'", len(initial_cases), cfg.cases_folder)
 
     async with aiohttp.ClientSession() as http_session:
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=True)
-
-            async def make_context() -> BrowserContext:
-                return await browser.new_context(
-                    viewport={"width": 1280, "height": 900},
-                    locale="ar-EG",
-                )
-
-            log.info(
-                "Browser launched (headless). Scanning '%s' for .xml/.txt case files…",
-                cfg.cases_folder,
-            )
+            log.info("Browser launched (headless).")
 
             try:
-                files = discover_case_files(cfg.cases_folder)
-                if not files:
-                    log.info("No case files found in '%s'. Exiting.", cfg.cases_folder)
-                    return
+                idle_since: float | None = None
 
-                log.info("Found %d case file(s) to process", len(files))
+                while True:
+                    cases = _load_pending_cases(cfg.cases_folder)
+                    if cases:
+                        idle_since = None
+                        await _process_batch(cases, cfg, http_session, browser)
+                        await asyncio.sleep(cfg.watch_poll_seconds)
+                        continue
 
-                cases: list[CaseData] = []
-                for fp in files:
-                    parsed = parse_case_file(fp)
-                    if parsed:
-                        cases.append(parsed)
+                    if cfg.watch_idle_seconds <= 0:
+                        log.info("All cases processed. Closing program.")
+                        break
 
-                if not cases:
-                    log.info("No valid cases parsed. Exiting.")
-                    return
+                    if idle_since is None:
+                        idle_since = time.monotonic()
+                        log.info(
+                            "Watching '%s' for new files (poll every %ds, exit after %ds idle)…",
+                            cfg.cases_folder,
+                            cfg.watch_poll_seconds,
+                            cfg.watch_idle_seconds,
+                        )
+                        print(
+                            f"بانتظار ملفات جديدة في register_cases "
+                            f"(إغلاق تلقائي بعد {cfg.watch_idle_seconds} ثانية)…"
+                        )
 
-                tasks = [
-                    asyncio.create_task(
-                        process_case(case, cfg, http_session, semaphore, make_context)
-                    )
-                    for case in cases
-                ]
-                await asyncio.gather(*tasks, return_exceptions=True)
+                    if time.monotonic() - idle_since >= cfg.watch_idle_seconds:
+                        log.info(
+                            "No new files for %ds — closing program.",
+                            cfg.watch_idle_seconds,
+                        )
+                        print("انتهى — لا ملفات جديدة.")
+                        break
 
-                log.info("All %d case(s) processed. Exiting.", len(cases))
+                    await asyncio.sleep(cfg.watch_poll_seconds)
 
             except KeyboardInterrupt:
-                log.info("Shutdown requested via keyboard interrupt")
+                log.info("Stopped by user.")
+                print("\nتم الإيقاف.")
             finally:
                 await browser.close()
-                log.info("Browser closed. Exiting.")
+                log.info("Browser closed.")
 
-
-def _pause_before_exit() -> None:
-    if is_frozen():
-        print()
-        input("Press Enter to close... ")
+    return 0
 
 
 if __name__ == "__main__":
     exit_code = 0
     try:
-        asyncio.run(main())
+        exit_code = asyncio.run(main())
+    except SystemExit as exc:
+        code = exc.code
+        exit_code = int(code) if isinstance(code, int) else (1 if code else 0)
     except KeyboardInterrupt:
         log.info("Process terminated.")
+        exit_code = 0
     except Exception:
         log.exception("Fatal error")
         exit_code = 1
-    finally:
-        _pause_before_exit()
+    pause_on_error(exit_code)
     sys.exit(exit_code)

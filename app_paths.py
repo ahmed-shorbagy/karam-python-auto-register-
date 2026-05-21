@@ -36,3 +36,15 @@ def resolve_data_path(path_str: str) -> Path:
 
 def is_frozen() -> bool:
     return getattr(sys, "frozen", False)
+
+
+def pause_on_error(exit_code: int) -> None:
+    """Keep console open when packaged .exe exits with an error."""
+    if not is_frozen() or exit_code == 0:
+        return
+    try:
+        print()
+        print("اضغط Enter للإغلاق...")
+        input()
+    except (EOFError, KeyboardInterrupt):
+        pass
