@@ -1,5 +1,6 @@
 # Secrets — use register.ini.template locally
 register.ini
+register_customer.ini
 
 # Customer package (build locally with build_release.py)
 release/

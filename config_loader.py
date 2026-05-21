@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app_paths import app_path, resolve_data_path
+from telegram_utils import normalize_chat_id
 
 log = logging.getLogger("karama")
 
@@ -42,7 +43,8 @@ class AppConfig:
     error_images_folder: str = "error_images"
     threads_count: int = 4
     watch_poll_seconds: int = 3
-    watch_idle_seconds: int = 120
+    watch_idle_seconds: int = 0
+    ssl_verify: bool = True
 
 
 def ensure_config_file() -> Path:
@@ -101,6 +103,26 @@ def _get_int(
     return fallback
 
 
+def _get_bool(
+    parser: configparser.ConfigParser,
+    sections: list[str | None],
+    keys: tuple[str, ...],
+    fallback: bool,
+) -> bool:
+    for section in sections:
+        if not section:
+            continue
+        for key in keys:
+            if parser.has_option(section, key):
+                raw = parser.get(section, key).strip().lower()
+                if raw in ("1", "true", "yes", "on"):
+                    return True
+                if raw in ("0", "false", "no", "off"):
+                    return False
+                log.warning("Invalid boolean for %s.%s: %r", section, key, raw)
+    return fallback
+
+
 def _mask_token(token: str) -> str:
     if not token or len(token) < 12:
         return "(not set)"
@@ -126,7 +148,7 @@ def validate_telegram(cfg: AppConfig) -> None:
         for err in errors:
             log.error("  - %s", err)
         log.error(
-            "Open '%s' in Notepad, set [TELEGRAM] BOT_TOKEN and CHANNEL, save, then run again.",
+            "Open '%s' in Notepad, set TELEGRAM_BOT and TELEGRAM_CHANNEL, save, then run again.",
             CONFIG_FILE,
         )
         print()
@@ -134,7 +156,7 @@ def validate_telegram(cfg: AppConfig) -> None:
         print("  إعدادات تيليجرام غير مكتملة")
         print("=" * 50)
         print("  1) شغّل: 0 - تعديل الإعدادات.bat")
-        print("  2) عدّل BOT_TOKEN و CHANNEL في register.ini")
+        print("  2) عدّل TELEGRAM_BOT و TELEGRAM_CHANNEL في register.ini")
         print("  3) احفظ الملف (Ctrl+S) ثم أغلق Notepad")
         print("  4) شغّل: 2 - اختبار تيليجرام.bat للتأكد")
         print("=" * 50)
@@ -163,7 +185,9 @@ def load_config(ini_path: Path | None = None, *, require_telegram: bool = True) 
 
     cfg = AppConfig(
         telegram_bot=_get_option(parser, sections, _BOT_KEYS),
-        telegram_channel=_get_option(parser, sections, _CHANNEL_KEYS),
+        telegram_channel=normalize_chat_id(
+            _get_option(parser, sections, _CHANNEL_KEYS)
+        ),
         telegram_view_url=_get_option(
             parser,
             sections,
@@ -193,8 +217,9 @@ def load_config(ini_path: Path | None = None, *, require_telegram: bool = True) 
             parser, sections, ("WATCH_POLL_SECONDS", "POLL_SECONDS"), 3
         ),
         watch_idle_seconds=_get_int(
-            parser, sections, ("WATCH_IDLE_SECONDS", "IDLE_SECONDS"), 120
+            parser, sections, ("WATCH_IDLE_SECONDS", "IDLE_SECONDS"), 0
         ),
+        ssl_verify=_get_bool(parser, sections, ("SSL_VERIFY",), True),
     )
 
     log.info("Config file: %s", ini_path.resolve())
@@ -217,7 +242,7 @@ def load_config(ini_path: Path | None = None, *, require_telegram: bool = True) 
     return cfg
 
 
-def load_telegram_only() -> tuple[str, str, str]:
-    """For TestTelegram.exe — bot token, channel id, view URL template."""
+def load_telegram_only() -> tuple[str, str, str, bool]:
+    """For TestTelegram.exe — bot token, channel id, view URL, ssl_verify."""
     cfg = load_config(require_telegram=True)
-    return cfg.telegram_bot, cfg.telegram_channel, cfg.telegram_view_url
+    return cfg.telegram_bot, cfg.telegram_channel, cfg.telegram_view_url, cfg.ssl_verify

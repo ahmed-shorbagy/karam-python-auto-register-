@@ -11,7 +11,7 @@ a = Analysis(
     binaries=playwright_binaries,
     datas=playwright_datas,
     hiddenimports=playwright_hidden + [
-        "aiohttp", "bs4", "app_paths", "notify_format", "config_loader",
+        "aiohttp", "bs4", "app_paths", "notify_format", "config_loader", "telegram_utils", "http_client", "certifi", "server_messages",
     ],
     hookspath=[],
     hooksconfig={},

@@ -30,6 +30,7 @@ CUSTOMER_BATS = [
     ("EDIT_SETTINGS.bat", "0 - تعديل الإعدادات.bat"),
     ("1 - تشغيل البرنامج.bat", "1 - تشغيل البرنامج.bat"),
     ("2 - اختبار تيليجرام.bat", "2 - اختبار تيليجرام.bat"),
+    ("3 - مسح السجل.bat", "3 - مسح السجل.bat"),
 ]
 
 
@@ -66,11 +67,43 @@ def copy_chromium_browsers(target: Path) -> None:
 
 
 def write_customer_files(target: Path) -> None:
-    for folder in ("register_cases", "register_finished", "error_images"):
-        (target / folder).mkdir(exist_ok=True)
+    folder_notes = {
+        "register_cases": (
+            "_اقرأني.txt",
+            "مجلد ملفات الحالات\r\n"
+            "==================\r\n\r\n"
+            "• ضع كل ملفات .xml هنا (ملف واحد لكل شخص)\r\n"
+            "• لا تضع sample_case.txt هنا — هو مثال فقط في المجلد الرئيسي\r\n"
+            "• شغّل: 1 - تشغيل البرنامج.bat\r\n"
+            "• بعد النجاح ينتقل الملف إلى register_finished\r\n",
+        ),
+        "register_finished": (
+            "_اقرأني.txt",
+            "مجلد الحالات المنتهية\r\n"
+            "====================\r\n\r\n"
+            "• الملفات تنتقل هنا تلقائياً بعد الحجز الناجح\r\n"
+            "• لا تحذف هذا المجلد\r\n",
+        ),
+        "error_images": (
+            "_اقرأني.txt",
+            "مجلد صور الأخطاء\r\n"
+            "=================\r\n\r\n"
+            "• عند فشل حالة تُحفظ صورة الخطأ هنا\r\n"
+            "• الملف الأصلي يبقى في register_cases لإعادة المحاولة\r\n",
+        ),
+    }
 
-    shutil.copy2(ROOT / "register.ini.template", target / "register.ini")
+    for folder, (note_name, note_text) in folder_notes.items():
+        folder_path = target / folder
+        folder_path.mkdir(exist_ok=True)
+        (folder_path / note_name).write_text(note_text, encoding="utf-8")
+
     shutil.copy2(ROOT / "register.ini.template", target / "register.ini.template")
+    customer_ini = ROOT / "register_customer.ini"
+    if customer_ini.exists():
+        shutil.copy2(customer_ini, target / "register.ini")
+    else:
+        shutil.copy2(ROOT / "register.ini.template", target / "register.ini")
     shutil.copy2(ROOT / "sample_case.txt", target / "sample_case.txt")
     shutil.copy2(ROOT / "دليل_المستخدم.txt", target / "دليل_المستخدم.txt")
     shutil.copy2(ROOT / "فك_الضغط_أولاً.txt", target / "فك_الضغط_أولاً.txt")
@@ -89,11 +122,15 @@ def write_customer_files(target: Path) -> None:
         "================\n\n"
         "⚠️ فك ضغط الـ ZIP كاملاً إلى مجلد قبل أي تشغيل!\n"
         "   (اقرأ: فك_الضغط_أولاً.txt)\n\n"
-        "1) 0 - تعديل الإعدادات.bat  → إعدادات تيليجرام (register.ini)\n"
-        "   إذا لم يفتح شيء: جرّب 0 - تعديل الإعدادات.vbs\n"
-        "2) 2 - اختبار تيليجرام.bat   → اختبار الإشعار\n"
-        "3) ضع ملفات .xml في: register_cases\n"
-        "4) 1 - تشغيل البرنامج.bat    → بدء الحجز\n\n"
+        "✓ register.ini جاهز بإعدادات تيليجرام — لا تحتاج تعديلاً إلا إذا غيّرت البوت أو القناة.\n\n"
+        "المجلدات:\n"
+        "  register_cases     ← ضع ملفات .xml هنا\n"
+        "  register_finished  ← الملفات بعد الحجز الناجح\n"
+        "  error_images       ← صور الأخطاء\n\n"
+        "1) 2 - اختبار تيليجرام.bat   → تأكد أن الإشعار يصل\n"
+        "2) ضع ملفات .xml في: register_cases\n"
+        "3) 1 - تشغيل البرنامج.bat    → بدء الحجز\n\n"
+        "لتعديل الإعدادات: 0 - تعديل الإعدادات.bat\n\n"
         "ملفات داخلية (لا تحذف):\n"
         "  KaramaStart.exe, TestTelegram.exe, browsers, _internal\n\n"
         "لا تحذف مجلد browsers\n",
@@ -105,10 +142,13 @@ def make_zip(source_dir: Path, zip_path: Path) -> None:
     if zip_path.exists():
         zip_path.unlink()
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for file in sorted(source_dir.rglob("*")):
-            if file.is_file():
-                arcname = file.relative_to(source_dir.parent)
-                zf.write(file, arcname)
+        for path in sorted(source_dir.rglob("*")):
+            rel = path.relative_to(source_dir.parent)
+            if path.is_file():
+                zf.write(path, rel)
+            elif path.is_dir():
+                # Preserve empty folders in the ZIP
+                zf.writestr(str(rel).replace("\\", "/") + "/", "")
     size_mb = zip_path.stat().st_size // (1024 * 1024)
     print(f"ZIP created: {zip_path} ({size_mb} MB approx)")
 
@@ -124,6 +164,9 @@ def main() -> None:
         "--hidden-import", "app_paths",
         "--hidden-import", "notify_format",
         "--hidden-import", "config_loader",
+        "--hidden-import", "telegram_utils",
+        "--hidden-import", "http_client",
+        "--hidden-import", "certifi",
         "test_telegram.py",
     ])
 
